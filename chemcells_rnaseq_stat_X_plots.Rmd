@@ -1,0 +1,1097 @@
+---
+title: "Chemical Cells RNA Seq Analysis X - Paper plots"
+author: "jxie"
+date: "2024-07-20"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    toc_depth: 3
+    number_sections: true
+    theme: lumen
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(limma)
+library(qqman)
+library(ggplot2)
+library(ggfortify)
+library(lme4)
+library(lmerTest)
+library(RColorBrewer)
+library(ggpubr)
+library(readxl)
+library(org.Hs.eg.db)
+library(ggh4x)
+library(ggvenn)
+library(ggrepel)
+library(DOSE)
+library(enrichplot)
+library(clusterProfiler)
+
+library(tidyverse)
+```
+
+# Load Data
+
+```{r}
+source("plot_functions.R")
+dat_pheno <- readRDS("02_Intermediates/Experiment_Samples.rds") 
+dat_rna <-  readRDS("02_Intermediates/RNA_TMM.rds")
+dat_CN <- readRDS("02_Intermediates/mtDNA.rds")
+# G_list <- readRDS("01_Inputs/GeneList.rds")
+G_list <- read.delim("01_Inputs/mart_export.txt") %>% subset(Gene.stable.ID %in% rownames(dat_rna))
+names(G_list) <- c("ensembl_gene_id", "entrezgene_id", "hgnc_symbol", "chromosome_name", 
+                   "start_position", "end_position", "strand", "gene_type", 
+                   "gene_description", "gene_name")
+G_list <- G_list[!duplicated(G_list$ensembl_gene_id),]
+G_list$chromosome_name = factor(G_list$chromosome_name,levels = c(
+  1:22,"X","MT"
+))
+
+MitoCarta_Genes <- read_xlsx("01_Inputs/Human.MitoCarta3.0.xlsx", sheet = "A Human MitoCarta3.0", col_types = "text") %>% 
+  as.data.frame() 
+MitoCarta_Paths <- read_xlsx("01_Inputs/Human.MitoCarta3.0.xlsx", sheet = "C MitoPathways", col_types = "text") %>% as.data.frame()
+
+```
+
+```{r, eval = FALSE}
+G_list <- read.delim("01_Inputs/mart_export.txt")
+names(G_list) <- c("ensembl_gene_id", "entrezgene_id", "hgnc_symbol", "chromosome_name", 
+                   "start_position", "end_position", "strand", "gene_type", 
+                   "gene_description", "gene_name")
+G_list <- G_list[!duplicated(G_list$ensembl_gene_id),]
+G_list$chromosome_name = factor(G_list$chromosome_name,levels = c(
+  1:22,"X","MT"
+))
+dat_raw <- read.csv("01_Inputs/merged.csv")
+dat_rna <- as.matrix(dat_raw[-(1:5),-1])
+rownames(dat_rna) <- dat_raw$Gene[-(1:5)]
+```
+
+
+## Map CN to pheno
+
+```{r}
+dat_CN$PO <- factor(dat_CN$PO)
+```
+
+```{r}
+dat_Mixed <- merge(dat_pheno, dat_CN[,c(1:2,4)], by.x = "SampleName", by.y = "Sample_Name")
+dat_Mixed <- dat_Mixed[order(dat_Mixed$Chemical,dat_Mixed$Curve,
+                             dat_Mixed$Dose, dat_Mixed$Rep, dat_Mixed$Lane, dat_Mixed$PO),]
+```
+
+```{r}
+dat_pheno$deltaCT_Avg <- sapply(dat_pheno$SampleName, function(x){
+  return(dat_CN$deltaCT_Avg[which(dat_CN$Sample_Name == x & !is.na(dat_CN$deltaCT_Avg))])
+})
+
+```
+
+## Load regression
+
+```{r}
+
+ETBR_CN_lmer <- readRDS("02_Intermediates/ETBR_CN_lmer.rds")
+ETBR_CN_lmer2 <- readRDS("02_Intermediates/ETBR_CN_lmer2.rds")
+ETBR_MT_lmer <- readRDS("02_Intermediates/ETBR_MT_lmer.rds")
+ETBR_CN_anova <- readRDS("02_Intermediates/ETBR_CN_anova.rds")
+ETBR_rnr_lmer <- readRDS("02_Intermediates/ETBR_rnr_lmer.rds")
+
+dat_etbr <- readRDS("02_Intermediates/ETBR_paths.rds") %>% subset(gene_type != "Mt_tRNA") %>% 
+  left_join(ETBR_CN_lmer2, by = "Gene",suffix = c("","_sq")) %>%
+  left_join(ETBR_MT_lmer, by = "Gene",suffix = c("","_mt")) %>%
+  left_join(ETBR_rnr_lmer, by = "Gene",suffix = c("","_rnr")) %>%
+  left_join(ETBR_CN_anova, by = "Gene") %>%
+  mutate(
+    Sig_lin = p.adjust(P,"holm") < 0.05,
+    Sig_mt = p.adjust(P_mt,"holm") < 0.05,
+    Sig_rnr = p.adjust(P_rnr,"holm") < 0.05,
+    Sig_sq = p.adjust(P12,"holm") < 0.05,
+    Sig_sp2 = p.adjust(P13,"holm") < 0.05,
+    Sig_sp3 = p.adjust(P14,"holm") < 0.05
+  ) %>% 
+  select(hgnc_symbol, Sig_lin, Sig_mt, Sig_rnr, Sig_sq, Sig_sp2, Sig_sp3, post_path,
+         Gene, entrezgene_id, chromosome_name, start_position, end_position, strand,
+         Estimate, SE, P, Estimate_mt, SE_mt, P_mt, P_rnr, L_CN,L_MT, L_lag, 
+         AIC1, AIC2, AIC3, AIC4, P12, P13, P14,
+         gene_description)
+
+dat_etbr$post_path <- factor(dat_etbr$post_path, levels = c("Switch","Linear","Delayed","None"))
+
+uni = unique(dat_etbr$entrezgene_id[!is.na(dat_etbr$entrezgene_id)])
+uni = uni[ ! uni %in% dat_etbr$entrezgene_id[dat_etbr$chromosome_name=="MT"]]
+uni = as.character(uni)
+```
+
+# Figure 1
+
+### A. EtBr Dosage changes copy number 
+
+```{r, message=FALSE, fig.height=3, fig.width=4.5}
+
+plot.CN.Dose3("ETBR") + 
+  geom_signif(
+    y_position = rep(12,6),
+    xmin = (c(0:5)*25) + 5,
+    xmax = (c(0:5)*25) + 20,
+    annotation = c("***", "**", "***","*","**","ns"), tip_length = 0.01, textsize = 3, size = 0.75
+    ) + ylab("mtDNA-CN (deltaCT)")
+
+```
+
+```{r, message=FALSE, fig.height=3, fig.width=4.5}
+
+Cairo::CairoSVG (file = "test2.svg",
+                width = 4.5, height = 3)
+
+a <- plot.CN.Dose3("ETBR") + 
+  geom_signif(
+    y_position = rep(12,6),
+    xmin = (c(0:5)*25) + 5,
+    xmax = (c(0:5)*25) + 20,
+    annotation = c("***", "**", "***","*","**","ns"), tip_length = 0.01, textsize = 3, size = 0.75
+    ) + ylab("mtDNA-CN (deltaCT)")
+print(a)
+dev.off()
+
+# ggsave(filename = "test.svg", device = "svg")
+
+```
+
+### B. EtBr Dosage changes mtRNA 
+
+```{r, message=FALSE, fig.height=12, fig.width=12}
+
+mt_genes = list()
+
+i = 1
+
+g_list <- dat_etbr %>% subset(chromosome_name == "MT") %>% arrange(start_position) %>% select(hgnc_symbol) %>% unlist
+
+# g_list <- c("MT-RNR1", "GAPDH","MT-CYB","MT-ND6",
+#             "MT-RNR2","GAPDH","GAPDH","MT-ND5",
+#             "MT-ND1","GAPDH","GAPDH","MT-ND4",
+#             "MT-ND2","GAPDH","GAPDH","MT-ND4L",
+#             "MT-CO1","GAPDH","GAPDH","MT-ND3",
+#             "MT-CO2","MT-ATP8","MT-ATP6","MT-CO3")
+
+g_name <- c("12S rRNA", "16S rRNA","ND1","ND2",
+            "COX1","COX2","GAPDH","MT-ND5",
+            "MT-ND1","GAPDH","GAPDH","MT-ND4",
+            "MT-ND2","GAPDH","GAPDH","MT-ND4L",
+            "MT-CO1","GAPDH","GAPDH","MT-ND3",
+            "MT-CO2","MT-ATP8","MT-ATP6","MT-CO3")
+
+for(g in g_list){
+  mt_genes[[i]] = plot.Gene.Dose3(g,"ETBR") + 
+    theme(# axis.title.x=element_blank(),
+          # axis.text.x=element_text(size = 10),
+          # axis.text.y=element_text(size = 10),
+          # axis.title.y=element_text(size = 10),
+          # axis.ticks.x=element_blank()
+          rect = element_rect(fill = "transparent"))
+
+  i = i +1
+}
+
+ggarrange(plotlist = mt_genes, ncol = 4, nrow = 6)
+
+```
+
+```{r, message=FALSE, fig.height=2, fig.width=3}
+
+g_list <- dat_etbr %>% subset(chromosome_name == "MT") %>% arrange(start_position) %>% select(hgnc_symbol) %>% unlist
+i = 1
+for(g in g_list){
+  
+  Cairo::CairoSVG (file = paste0(g,".svg"),
+                  width = 3, height = 2)
+  
+  a <- plot.Gene.Dose3(g_list[i],"ETBR") + 
+    theme(rect = element_rect(fill = "transparent"))
+  print(a)
+  dev.off()
+  i = i+1
+}
+
+```
+
+# Figure 2
+
+```{r}
+cnfc = c()
+for(i in 1:6){
+  cnfc = c(cnfc,(coef(lm(deltaCT_Avg~Dose, data = dat_pheno %>% subset(Curve == "Dosage" & Dose %in% c(0,i)))))[2])
+}
+
+cn_fc = data.frame(dose = 1:6, fc = cnfc)
+cn_fc$Dose = factor(cn_fc$dose)
+
+```
+
+```{r, message=FALSE, fig.height=4, fig.width=6}
+
+logFC1 = data.frame(
+  Dose = character(),
+  Gene = character(),
+  logFC = numeric(),
+  logSD = numeric()
+)
+
+mt_list <- g_list#[-(1:4)]
+
+for(i in mt_list){
+  dat_temp <- dat.Gene(i, dat_rna, "Dose", dat_pheno) %>% subset(Chemical == "ETBR" & Curve == "Dosage")
+  for(j in unique(dat_temp$Dose)[-1]){
+    a <- lmer(log2(Y) ~ I(Dose!=0) + (1|SampleName),dat_temp %>% subset(Dose %in% c(0,j))) %>%
+      summary %>% coef
+    logFC1 <- rbind(
+      logFC1, 
+      data.frame(
+        Dose = j,
+        Gene = i,
+        logFC = a[2,1],
+        logSD = a[2,2]
+      )
+    )
+  }
+}
+
+logFC1$Gene = factor(logFC1$Gene, levels = mt_list)#[c(10:15,1:9)])
+logFC1$Dose = factor(as.numeric(logFC1$Dose)*25)
+logFC1$X = sapply(logFC1$Gene, function(x){
+  dat_etbr %>% subset(hgnc_symbol == x) %>% 
+    mutate(x = (start_position + end_position)/2) %>% select(x) %>% unlist
+})
+logFC1$cn = cnfc[logFC1$Dose]
+
+# logFC1$X2 = ifelse(logFC1$X < 8000, logFC1$X, logFC1$X-16569)
+
+ggplot(logFC1, aes(x=X, y = logFC, group = Dose, color= Dose)) + geom_line() + geom_point() + 
+  geom_hline(aes(yintercept = cn, color = Dose), alpha = 0.5) + 
+  theme_classic2() + scale_x_continuous(name = "Position (bp)")#guide = guide_axis(n.dodge = 2))
+
+Cairo::CairoSVG (file = paste0("fig2a.svg"),
+                width = 6, height = 4)
+a <- ggplot(logFC1, aes(x=X, y = logFC, group = Dose, color= Dose)) + geom_line() + geom_point() + 
+  geom_hline(aes(yintercept = cn, color = Dose), alpha = 0.5) + 
+  theme_classic2() + scale_x_continuous(name = "Position (bp)")#guide = guide_axis(n.dodge = 2))
+print(a)
+dev.off()
+
+
+```
+
+```{r, message=FALSE, fig.height=4, fig.width=6}
+
+logFC3 <- merge(logFC1, G_list[,c(3,5,6,7)], by.x = "Gene", by.y = "hgnc_symbol")
+
+logFC3$X1 = (logFC3$start_position+logFC3$end_position)/2
+logFC3$X2 = ifelse(logFC3$strand==1, logFC3$X1 - 556,
+                   16569 + 413 - logFC3$X1)
+logFC3$X3 = pmin(logFC3$X1 - 556, 16569 + 413 - logFC3$X1)
+logFC3$X4 = pmin(logFC3$X1 - 556, 16569 + 275 - logFC3$X1)
+logFC3$Complex = NA
+logFC3$Complex[grep("ND",logFC3$Gene)]="I"
+logFC3$Complex[grep("CO",logFC3$Gene)]="IV"
+logFC3$Complex[grep("ATP",logFC3$Gene)]="V"
+logFC3$Complex[grep("CYB",logFC3$Gene)]="III"
+logFC3$Complex[grep("RNR",logFC3$Gene)]="rRNA"
+
+ggplot(logFC3 %>% subset(Dose == 150), aes(x=X3, y = logFC))  + 
+  geom_hline(yintercept = -2.863) + 
+  geom_smooth(se=F, method = 'lm') + 
+  geom_point() + #geom_text(position = position_dodge(width = 1)) + 
+  theme_classic2() + xlab("Distance from nearest promoter (bp)")
+
+Cairo::CairoSVG (file = paste0("fig2b.svg"),
+                width = 6, height = 4)
+a <- ggplot(logFC3 %>% subset(Dose == 150), aes(x=X3, y = logFC))  + 
+  geom_hline(yintercept = -2.863) + 
+  geom_smooth(se=F, method = 'lm') + 
+  geom_point() + #geom_text(position = position_dodge(width = 1)) + 
+  theme_classic2() + xlab("Distance from nearest promoter (bp)")
+print(a)
+dev.off()
+
+
+```
+
+```{r, message=FALSE, fig.height=4, fig.width=6}
+summary(lm(logFC~X3, logFC3 %>% subset(Dose==150)))
+```
+
+# Figure X DE nuclear genes
+
+```{r, message=FALSE, fig.height=4, fig.width=6}
+
+dat_plot <- dat_etbr %>%
+  mutate(
+    log2FC = Estimate/log(2),
+    log10P = log10(P)
+    ) %>% 
+  subset(chromosome_name != "MT")
+
+p_cut <- max(dat_plot$P[which(p.adjust(dat_plot$P,"holm")<0.05)])
+
+dat_plot$delabel <- ifelse(
+  (dat_plot$log10P <= log10(p_cut)) & 
+    dat_plot$hgnc_symbol %in% (MitoCarta_Genes %>% subset(grepl("dogma",MitoCarta3.0_MitoPathways)) %>% select(Symbol) %>% unlist),
+  dat_plot$hgnc_symbol,"") 
+
+table(dat_plot$P <= p_cut,
+      ifelse(dat_plot$Estimate > 0, "Down", "Up"))
+
+table(ifelse(dat_plot$Estimate[dat_plot$P <= p_cut] > 0, "Down", "Up"),
+      dat_plot$post_path[dat_plot$P <= p_cut])
+
+ggplot(dat_plot, 
+       aes(x = log2FC, y = -log10P, label = delabel)) + geom_point() + #scale_y_reverse() + 
+  geom_label_repel(max.overlaps = 100,label.size=NA, fill = alpha("white",0.1)) +
+  theme_classic2() + geom_hline(yintercept=-log10(p_cut), col="red")
+
+# ggplot(dat_plot %>% arrange(P), 
+#        aes(x = -log10((1:(dim(dat_plot)[1]))/(dim(dat_plot)[1])), y = -log10P)) + 
+#   geom_point() + xlab("Expected (-log10P)") + ylab("Observed (-log10P)") +
+#   geom_abline(slope = 1, intercept = 0) +
+#   theme_classic2()
+
+
+```
+
+# Figure 3. Enrichment of DE Genes
+
+```{r}
+
+top_genes <- dat_etbr %>% 
+  subset(chromosome_name != "MT" & !is.na(entrezgene_id)) %>%
+  mutate(
+    Sig_lin = p.adjust(P,"holm") < 0.05,
+    Sig_mt = p.adjust(P_mt,"holm") < 0.05,
+    Sig_rnr = p.adjust(P_rnr,"holm") < 0.05,
+    Sig_sq = p.adjust(P12,"holm") < 0.05,
+    Sig_sp2 = p.adjust(P13,"holm") < 0.05,
+    Sig_sp3 = p.adjust(P14,"holm") < 0.05
+  ) %>% 
+  subset(Sig_lin | Sig_mt | Sig_rnr | Sig_sq | Sig_sp2 | Sig_sp3 )
+
+
+```
+
+```{r,eval=FALSE}
+ego1 <- enrichGO(gene=top_genes$entrezgene_id[!is.na(top_genes$entrezgene_id)], 
+                universe=uni,
+                OrgDb=org.Hs.eg.db,
+                ont="BP",
+                pAdjustMethod="BH",
+                pvalueCutoff=0.05,
+                qvalueCutoff=0.05,
+                readable=TRUE)
+ 
+```
+
+```{r, fig.height=6, fig.width=12, message=FALSE, eval = FALSE}
+## convert gene ID to Symbol
+edox <- setReadable(ego1, 'org.Hs.eg.db', 'ENTREZID')
+edox2 <- pairwise_termsim(edox)
+# Making the plot
+p2 <- treeplot(edox2, fontsize = 4, showCategory = 20, cluster.params = list(n = 4, method = "average", label_words_n = 0))
+aplot::plot_list(p2)
+
+# edo <- pairwise_termsim(ego)
+# emapplot(edo, layout="kk")
+
+```
+
+```{r}
+ego2 <- enrichGO(gene=top_genes$entrezgene_id[!is.na(top_genes$entrezgene_id) & top_genes$Estimate<0 & top_genes$Sig_lin], 
+                universe=uni,
+                OrgDb=org.Hs.eg.db,
+                ont="BP",
+                pAdjustMethod="BH",
+                pvalueCutoff= 0.05,
+                qvalueCutoff= 0.05,
+                readable=TRUE)
+ 
+```
+
+```{r, fig.height=4, fig.width=14, message=FALSE}
+## convert gene ID to Symbol
+edox <- setReadable(ego2, 'org.Hs.eg.db', 'ENTREZID')
+edox2 <- pairwise_termsim(edox)
+# Making the plot
+p2 <- treeplot(edox2, fontsize = 4, showCategory = 50, cluster.params = list(n = 3, method = "average", label_words_n = 0))
+aplot::plot_list(p2)
+
+Cairo::CairoSVG (file = paste0("fig3a.svg"),
+                width = 14, height = 4)
+print(p2)
+dev.off()
+
+# edo <- pairwise_termsim(ego)
+# emapplot(edo, layout="kk")
+
+```
+
+```{r}
+ego3 <- enrichGO(gene=top_genes$entrezgene_id[!is.na(top_genes$entrezgene_id) & 
+                                                top_genes$Estimate>0 & top_genes$Sig_lin], 
+                universe=uni,
+                OrgDb=org.Hs.eg.db,
+                ont="BP",
+                pAdjustMethod="BH",
+                pvalueCutoff= 0.05,
+                qvalueCutoff= 0.05,
+                readable=TRUE)
+ 
+```
+
+```{r, fig.height=4, fig.width=15, message=FALSE}
+## convert gene ID to Symbol
+edox <- setReadable(ego3, 'org.Hs.eg.db', 'ENTREZID')
+edox2 <- pairwise_termsim(edox)
+# Making the plot
+p2 <- treeplot(edox2, fontsize = 4, showCategory = 20, cluster.params = list(n = 3, method = "average", label_words_n = 0))
+aplot::plot_list(p2)
+
+# edo <- pairwise_termsim(ego)
+# emapplot(edo, layout="kk")
+
+Cairo::CairoSVG (file = paste0("fig3b.svg"),
+                width = 14, height = 4)
+print(p2)
+dev.off()
+
+```
+
+# Figure 4
+
+```{r, message=FALSE, fig.height=2, fig.width=3}
+
+g_list <- c("SLC2A1","HK1","GPI","PFKL","ALDOA","TPI1","GAPDH",
+            "PGK1","PGM1","ENO1","PKM")
+i = 1
+for(g in g_list){
+  
+  Cairo::CairoSVG (file = paste0(g,"_dos.svg"),
+                  width = 3, height = 2)
+  a = plot.Gene.Dose3(g,"ETBR") + 
+    theme(#axis.title.x=element_blank(),
+          # axis.text.x=element_text(size = 10),
+          # axis.text.y=element_text(size = 10),  
+          # axis.title.y=element_text(size = 10),
+          # axis.ticks.x=element_blank()
+          rect = element_rect(fill = "transparent"))
+  
+  print(a)
+  dev.off()
+  i = i+1
+  print(a)
+}
+
+```
+
+# Figure 6
+
+```{r, message=FALSE, fig.height=3, fig.width=4.5}
+
+Drug = "ETBR"
+  
+dat_plot <- dat_pheno %>% subset(Chemical == Drug & Curve != "Dosage" & Lane == 1)
+
+dat_plot$EtBr = NA
+dat_plot$EtBr[dat_plot$Dose == 6] = "Experimental"
+dat_plot$EtBr[dat_plot$Dose == 0] = "Control"
+dat_plot$EtBr = factor(dat_plot$EtBr, levels = c("Control","Experimental"))
+
+all_x = apply(expand.grid(levels(dat_plot$Rep), levels(dat_plot$EtBr),as.character(seq(0,192,24))),1,paste, collapse = "_")
+
+dat_plot %<>%
+  mutate(grouping = paste(Time,Dose,sep = "-")) %>%
+  group_by(grouping) %>% mutate(
+    Y = (mean((deltaCT_Avg))),
+    Y_sd = (sd((deltaCT_Avg)))
+  ) %>% select(grouping, Time,Dose, deltaCT_Avg, Y, Y_sd, EtBr) %>%
+  ungroup() %>% unique()
+
+ggplot(dat_plot, aes(x = Time, y = Y, group = EtBr)) +
+  geom_line(position = position_dodge(0.4), alpha=0.2, aes(colour = EtBr)) + 
+  geom_point(position = position_dodge(0.4), size = 1, aes(y=deltaCT_Avg, colour = EtBr)) + 
+  geom_errorbar(aes(ymin = Y+Y_sd*(-1),ymax = Y+Y_sd*(1), colour = EtBr), 
+                width = 1, position = position_dodge(0.4)) +
+  theme_classic2() + ylab("mtDNA-CN (deltaCT)") + xlab("Time (hours)") +
+  scale_x_discrete(drop = TRUE, labels = unique(dat_plot$Time)) + 
+  scale_color_brewer(type = "qual", palette = "Dark2") +guides(color = "none")+
+  geom_signif(
+    y_position = rep(12.6, 7), 
+    xmin = (c(0:6)*1) -0.25+1, 
+    xmax = (c(0:6)*1) +0.25+1,
+    annotation = c("ns", "***", "***","***","*","ns","ns"), 
+    tip_length = 0.01, textsize = 4, size = 1)
+
+ggpubr::get_legend(ggplot(dat_plot, aes(x = Time, y = Y, group = EtBr,colour = EtBr)) +
+  geom_line(alpha=0.2) + geom_point(aes(y=deltaCT_Avg)) + 
+  geom_errorbar(aes(ymin = Y+Y_sd*(-1),ymax = Y+Y_sd*(1)), width = 1) +
+  theme_classic2() + 
+  scale_color_brewer(type = "qual", palette = "Dark2")) %>% plot()
+
+
+#lm(deltaCT~EtBr, dat_plot %>% subset(Time == "0")) %>% summary()
+```
+
+```{r, message=FALSE, fig.height=3, fig.width=4.5}
+
+Cairo::CairoSVG (file = "cn_long.svg",
+                width = 4.5, height = 3)
+
+a <- ggplot(dat_plot, aes(x = Time, y = Y, group = EtBr)) +
+  geom_line(position = position_dodge(0.4), alpha=0.2, aes(colour = EtBr)) + 
+  geom_point(position = position_dodge(0.4), size = 1, aes(y=deltaCT_Avg, colour = EtBr)) + 
+  geom_errorbar(aes(ymin = Y+Y_sd*(-1),ymax = Y+Y_sd*(1), colour = EtBr), 
+                width = 1, position = position_dodge(0.4)) +
+  theme_classic2() + ylab("mtDNA-CN (deltaCT)") + xlab("Time (hours)") +
+  scale_x_discrete(drop = TRUE, labels = unique(dat_plot$Time)) + 
+  scale_color_brewer(type = "qual", palette = "Dark2") +guides(color = "none")+
+  geom_signif(
+    y_position = rep(12.6, 7), 
+    xmin = (c(0:6)*1) -0.25+1, 
+    xmax = (c(0:6)*1) +0.25+1,
+    annotation = c("ns", "***", "***","***","*","ns","ns"), 
+    tip_length = 0.01, textsize = 4, size = 1)
+
+print(a)
+dev.off()
+
+Cairo::CairoSVG (file = "lab_long.svg",
+                width = 4.5, height = 3)
+
+a <- ggpubr::get_legend(ggplot(dat_plot, aes(x = Time, y = Y, group = EtBr,colour = EtBr)) +
+  geom_line(alpha=0.2) + geom_point(aes(y=deltaCT_Avg)) + 
+  geom_errorbar(aes(ymin = Y+Y_sd*(-1),ymax = Y+Y_sd*(1)), width = 1) +
+  theme_classic2() + 
+  scale_color_brewer(type = "qual", palette = "Dark2")) %>% plot()
+
+
+print(a)
+dev.off()
+
+```
+
+```{r, message=FALSE, fig.height=12, fig.width=12}
+
+mt_genes = list()
+
+i = 1
+
+for(g in dat_etbr %>% subset(chromosome_name == "MT") %>% arrange(start_position) %>% select(hgnc_symbol) %>% unlist){
+  mt_genes[[i]] = plot.Gene.Long2(g) + 
+    theme(# axis.title.x=element_blank(),
+          # axis.text.x=element_blank(),
+          # axis.ticks.x=element_blank(),
+          legend.position = "none")+ 
+    scale_x_discrete(breaks = c("0","24","48","72","144","168","192"))
+
+  i = i +1
+}
+
+ggarrange(plotlist = mt_genes, ncol = 4, nrow = 6)
+
+```
+
+
+```{r, message=FALSE, fig.height=2, fig.width=3}
+
+g_list <- dat_etbr %>% subset(chromosome_name == "MT") %>% arrange(start_position) %>% select(hgnc_symbol) %>% unlist
+i = 1
+for(g in g_list){
+  
+  Cairo::CairoSVG (file = paste0(g,"_lon.svg"),
+                  width = 3, height = 2)
+  
+  a = mt_genes[[i]] = plot.Gene.Long2(g) + 
+    theme(# axis.title.x=element_blank(),
+          # axis.text.x=element_blank(),
+          # axis.ticks.x=element_blank(),
+          legend.position = "none")+ 
+    scale_x_discrete(breaks = c("0","24","48","72","144","168","192"))
+  
+  print(a)
+  dev.off()
+  i = i+1
+}
+
+```
+
+# Figure 7
+
+```{r, message=FALSE, fig.height=4, fig.width=6}
+
+plot.Scale.Lag2("PSAT1") + 
+  theme(legend.position="bottom",plot.title = element_text(hjust = -0.03,face = "bold")) + 
+  scale_color_discrete(type = c("black","red","blue"), labels = c("Linear:\nmtDNA-CN","Switch:\nMT Med FC","Delayed:\nPSAT1")) + 
+  ylim(-0.4,1.2) + ylab("Scaled FC")
+# ggpubr::get_legend(plot.Scale.Lag("PSAT1") +
+#                      theme(legend.position = "right")) %>% plot
+
+
+Cairo::CairoSVG (file = paste0("fig7.svg"),
+                width = 6, height = 4)
+a <- plot.Scale.Lag2("PSAT1") + 
+  theme(legend.position="bottom",plot.title = element_text(hjust = -0.03,face = "bold")) + 
+  scale_color_discrete(type = c("black","red","blue"), labels = c("Linear:\nmtDNA-CN","Switch:\nMT Med FC","Delayed:\nPSAT1")) + 
+  ylim(-0.4,1.2) + ylab("Scaled FC")
+print(a)
+dev.off()
+```
+
+
+# Table X. 
+
+```{r}
+table(Sig = top_genes$Sig_lin, Up = top_genes$Estimate<0) 
+```
+
+```{r}
+table(top_genes$post_path[top_genes$Sig_lin],top_genes$Estimate[top_genes$Sig_lin]<0)
+```
+
+```{r}
+table(top_genes$post_path[top_genes$Sig_lin],top_genes$Estimate[top_genes$Sig_lin]<0) %>% chisq.test()
+```
+
+```{r}
+table(top_genes$Estimate[top_genes$Sig_lin]<0, 
+      top_genes$Gene[top_genes$Sig_lin] %in% MitoCarta_Genes$EnsemblGeneID_mapping_version_20200130)
+```
+
+# Figure S2. Enrichment of Delayed response genes
+
+
+```{r, fig.height=6, fig.width=14}
+
+ego7 <- enrichGO(gene=top_genes$entrezgene_id[!is.na(top_genes$entrezgene_id) & top_genes$Sig_lin &
+                                               top_genes$post_path=="Delayed" & top_genes$Estimate < 0 ], 
+                universe=uni,
+                OrgDb=org.Hs.eg.db,
+                ont="BP",
+                pAdjustMethod="BH",
+                pvalueCutoff=0.05,
+                qvalueCutoff=0.05,
+                readable=TRUE)
+
+ 
+```
+
+```{r, fig.height=10, fig.width=14, message=FALSE}
+
+## convert gene ID to Symbol
+edox <- setReadable(ego7, 'org.Hs.eg.db', 'ENTREZID')
+edox2 <- pairwise_termsim(edox)
+# Making the plot
+p2 <- treeplot(edox2, fontsize = 4, showCategory = 500, cluster.params = list(n = 5, method = "average", label_words_n = 0))
+aplot::plot_list(p2)
+
+# edo <- pairwise_termsim(ego1)
+# emapplot(edo, layout="kk")
+
+```
+
+```{r}
+
+ego8 <- enrichGO(gene=top_genes$entrezgene_id[!is.na(top_genes$entrezgene_id)  & top_genes$Sig_lin &
+                                               top_genes$post_path=="Delayed" & top_genes$Estimate > 0], 
+                universe=uni,
+                OrgDb=org.Hs.eg.db,
+                ont="BP",
+                pAdjustMethod="BH",
+                pvalueCutoff=0.05,
+                qvalueCutoff=0.05,
+                readable=TRUE)
+ 
+```
+
+```{r, fig.height=3, fig.width=14, message=FALSE}
+
+## convert gene ID to Symbol
+edox <- setReadable(ego8, 'org.Hs.eg.db', 'ENTREZID')
+edox2 <- pairwise_termsim(edox)
+# Making the plot
+p2 <- treeplot(edox2, fontsize = 4, showCategory = 50, cluster.params = list(n = 1, method = "average", label_words_n = 0))
+aplot::plot_list(p2)
+
+# edo <- pairwise_termsim(ego8)
+# emapplot(edo, layout="kk")
+
+```
+
+
+```{r}
+
+ego9 <- enrichGO(gene=top_genes$entrezgene_id[!is.na(top_genes$entrezgene_id)  & top_genes$Sig_sp2 & 
+                                                top_genes$post_path=="Delayed"], 
+                universe=uni,
+                OrgDb=org.Hs.eg.db,
+                ont="BP",
+                pAdjustMethod="BH",
+                pvalueCutoff=0.05,
+                qvalueCutoff=0.05,
+                readable=TRUE)
+ 
+```
+
+```{r, fig.height=10, fig.width=14, message=FALSE}
+
+## convert gene ID to Symbol
+edox <- setReadable(ego9, 'org.Hs.eg.db', 'ENTREZID')
+edox2 <- pairwise_termsim(edox)
+# Making the plot
+p2 <- treeplot(edox2, fontsize = 4, showCategory = 50, cluster.params = list(n = 5, method = "average", label_words_n = 0))
+aplot::plot_list(p2)
+
+# edo <- pairwise_termsim(ego8)
+# emapplot(edo, layout="kk")
+
+```
+
+# Table 3. 
+
+```{r}
+
+top_linear <- top_genes %>% subset(Sig_lin)
+
+go_etbr <- goana(de = list(all = top_linear$entrezgene_id[!is.na(top_linear$entrezgene_id)],
+                           all_u = top_linear$entrezgene_id[!is.na(top_linear$entrezgene_id) & 
+                                                               top_linear$Estimate < 0],
+                           all_d = top_linear$entrezgene_id[!is.na(top_linear$entrezgene_id) & 
+                                                               top_linear$Estimate > 0],
+                           mt = top_linear$entrezgene_id[!is.na(top_linear$entrezgene_id) &
+                                                          top_linear$post_path=="Switch"],
+                           mt_u = top_linear$entrezgene_id[!is.na(top_linear$entrezgene_id) &
+                                                            top_linear$post_path=="Switch" & top_linear$Estimate < 0],
+                           mt_d = top_linear$entrezgene_id[!is.na(top_linear$entrezgene_id) & 
+                                                            top_linear$post_path=="Switch" & top_linear$Estimate > 0],
+                           cn = top_linear$entrezgene_id[!is.na(top_linear$entrezgene_id) & 
+                                                          top_linear$post_path=="Linear"],
+                           cn_u = top_linear$entrezgene_id[!is.na(top_linear$entrezgene_id) & 
+                                                            top_linear$post_path=="Linear" & top_linear$Estimate < 0],
+                           cn_d = top_linear$entrezgene_id[!is.na(top_linear$entrezgene_id) & 
+                                                            top_linear$post_path=="Linear" & top_linear$Estimate > 0],
+                           delay = top_linear$entrezgene_id[!is.na(top_linear$entrezgene_id) &
+                                                             top_linear$post_path=="Delayed"],
+                           delay_u = top_linear$entrezgene_id[!is.na(top_linear$entrezgene_id) &
+                                                               top_linear$post_path=="Delayed" & top_linear$Estimate < 0],
+                           delay_d = top_linear$entrezgene_id[!is.na(top_linear$entrezgene_id) &
+                                                               top_linear$post_path=="Delayed" & top_linear$Estimate > 0],
+                           none = top_linear$entrezgene_id[!is.na(top_linear$entrezgene_id) &
+                                                            top_linear$post_path=="None"],
+                           none_u = top_linear$entrezgene_id[!is.na(top_linear$entrezgene_id) & 
+                                                              top_linear$post_path=="None" & top_linear$Estimate < 0],
+                           none_d = top_linear$entrezgene_id[!is.na(top_linear$entrezgene_id) & 
+                                                              top_linear$post_path=="None" & top_linear$Estimate > 0]),
+                 universe = uni,
+                 species = "Hs",FDR = 0.05)
+
+# write.table(go_etbr %>% rownames_to_column("GOID"), "03_Outputs/GO_ETBR.tsv", 
+#             sep = "\t",quote = FALSE, row.names = FALSE)
+
+```
+
+```{r}
+
+i_go = sapply(c(
+  "alpha-amino acid metabolic process", # all up, delay up
+  "tRNA aminoacylation", # all up, delay up
+  "amino acid import across plasma membrane", # all up, delay up
+  "response to nutrient levels", # delay up
+  "mRNA processing",
+  "cholesterol metabolic process", # all down
+  "ribonucleoprotein complex biogenesis", # delay down
+  "response to fatty acid"
+), function(x){which(go_etbr$Term==x)}) %>% unlist()
+
+go_etbr[i_go,] %>% select("Term","Ont","N","all_u", "delay_u", "cn_u",
+                          "mt_u","none_u","all_d", "delay_d", "cn_d",
+                          "mt_d","none_d") %>% 
+  knitr::kable()
+```
+
+
+# Table 1. mito maintenance genes regulation
+
+
+```{r, message=FALSE, fig.height=15, fig.width=8}
+
+Mito_Genes <- MitoCarta_Genes %>% 
+  select(HumanGeneID, Symbol, EnsemblGeneID_mapping_version_20200130,
+         MitoCarta3.0_MitoPathways)
+Mito_Genes$EnsemblGeneID_mapping_version_20200130 <- 
+  sapply(Mito_Genes$EnsemblGeneID_mapping_version_20200130, function(x){
+    strsplit(x,"[|]")[[1]][1]
+  })
+
+Mito_Genes$Path <- 
+  sapply(Mito_Genes$MitoCarta3.0_MitoPathways, function(x){
+    strsplit(x,"[>]")[[1]][1] %>% str_replace("\\s+$", "")
+  })
+
+Mito_Genes %<>%
+  inner_join(
+    dat_etbr %>% select(Gene, entrezgene_id, hgnc_symbol,Estimate,P,post_path,P13),
+    by = c("EnsemblGeneID_mapping_version_20200130" = "Gene")
+  ) %>% arrange(P) 
+
+dogma_genes <- Mito_Genes %>% subset(grepl("Mitochondrial central dogma",MitoCarta3.0_MitoPathways)) %>%
+  mutate(
+    Sig1 = p.adjust(P,"holm") < 0.05,
+    Sig3 = hgnc_symbol %in% top_genes$hgnc_symbol,
+    Sig4 = p.adjust(P13,"holm") < 0.05
+  )
+
+oxphos_genes <- Mito_Genes %>% subset(grepl("OXPHOS",MitoCarta3.0_MitoPathways)) %>%
+  mutate(
+    Sig1 = p.adjust(P,"holm") < 0.05,
+    Sig3 = hgnc_symbol %in% top_genes$hgnc_symbol,
+    Sig4 = p.adjust(P13,"holm") < 0.05
+  )
+```
+
+```{r}
+for(i in 1:3){
+  list_path = c("mtRNA metabolism","Translation",
+                "mtDNA maintenance")[i]
+  table(dogma_genes %>%
+          subset(grepl(list_path, MitoCarta3.0_MitoPathways)) %>% 
+          mutate(Up = Estimate<0) %>% select(Sig1,Up)) %>% print()
+}
+
+table(oxphos_genes %>% subset(!grepl("MT-",hgnc_symbol)) %>%  
+        mutate(Up = Estimate<0) %>% select(Sig1,Up)) %>% print()
+```
+
+```{r}
+for(i in 1:3){
+  list_path = c("mtRNA metabolism","Translation",
+                "mtDNA maintenance")[i]
+  dogma_genes %>% mutate(Up = Estimate<0) %>% 
+    subset(grepl(list_path, MitoCarta3.0_MitoPathways) & Sig1 & Up) %>%
+    select(Symbol) %>% unlist() %>% print()
+  
+  dogma_genes %>% mutate(Up = Estimate<0) %>% 
+    subset(grepl(list_path, MitoCarta3.0_MitoPathways) & Sig1 & !Up) %>%
+    select(Symbol) %>% unlist() %>% print()
+}
+
+oxphos_genes %>% mutate(Up = Estimate<0) %>% 
+  subset(!grepl("MT-",hgnc_symbol) & Sig1 & Up) %>%
+  select(Symbol) %>% unlist() %>% print()
+
+oxphos_genes %>% mutate(Up = Estimate<0) %>% 
+  subset(!grepl("MT-",hgnc_symbol) & Sig1 & !Up) %>%
+  select(Symbol) %>% unlist() %>% print()
+
+```
+
+# Table 2. sensitivity analysis
+
+```{r}
+
+dat_temp <- top_linear
+
+GE_mean <- sapply(top_linear$Gene, function(x){
+  a <- data.Scale.Lag2(x)
+  if(a$Y[3] < 0){ a$Y = a$Y * -1}
+  
+  Y_mult = a$Y[3]
+  return(a$Y/Y_mult)
+})
+
+GE_sd <- sapply(top_linear$Gene, function(x){
+  a <- data.Scale.Lag2(x)
+  if(a$Y[3] < 0){ a$Y = a$Y * -1}
+  
+  Y_mult = a$Y[3]
+  return(a$Ysd/Y_mult)
+})
+
+CN_mean <- c(0,0.5,1,0.5)
+MT_mean <- c(0,1,1,0)
+lag_mean = c(0,.25,1,1)
+
+sen_mean = c(0,1,1,1)
+
+GE_L_CN <- c()
+GE_L_MT <- c()
+GE_L_lag <- c()
+
+for(i in 1:(dim(GE_mean)[2])){
+  GE_L_CN <- c(GE_L_CN, dnorm(CN_mean[2],GE_mean[2,i],GE_sd[2,i]) * dnorm(CN_mean[4],GE_mean[4,i],GE_sd[4,i]))
+  GE_L_MT <- c(GE_L_MT, dnorm(MT_mean[2],GE_mean[2,i],GE_sd[2,i]) * dnorm(MT_mean[4],GE_mean[4,i],GE_sd[4,i]))
+  GE_L_lag <- c(GE_L_lag, dnorm(lag_mean[2],GE_mean[2,i],GE_sd[2,i]) * dnorm(lag_mean[4],GE_mean[4,i],GE_sd[4,i]))
+}
+
+dat_temp <- dat_temp %>%
+  mutate(
+    L_CN = GE_L_CN,
+    L_MT = GE_L_MT,
+    L_lag = GE_L_lag,
+    # P_CN = GE_L_CN/(GE_L_CN+GE_L_MT+GE_L_lag+GE_L_sen),
+    # P_MT = GE_L_MT/(GE_L_CN+GE_L_MT+GE_L_lag+GE_L_sen),
+    # P_lag = GE_L_lag/(GE_L_CN+GE_L_MT+GE_L_lag+GE_L_sen),
+  )
+
+dat_temp$post_path1 <- apply(cbind(GE_L_CN/(GE_L_CN+GE_L_MT+GE_L_lag),
+                                   GE_L_MT/(GE_L_CN+GE_L_MT+GE_L_lag),
+                                   GE_L_lag/(GE_L_CN+GE_L_MT+GE_L_lag)),
+                             1,function(x){
+                               x_i <- order(x, decreasing = TRUE)
+                               ifelse(x[x_i[1]] / x[x_i[2]] > 2,
+                                      return(x_i[1]),
+                                      return(4))
+                             })
+
+dat_temp <- dat_temp %>% mutate(
+  post_path1 = factor(
+    c("Linear","Switch","Delayed","None")[post_path1],
+    c("Delayed","Linear","Switch","None"))
+)
+
+dat_temp$post_path2 <- apply(cbind(GE_L_CN/(GE_L_CN+GE_L_MT+GE_L_lag),
+                                   GE_L_MT/(GE_L_CN+GE_L_MT+GE_L_lag),
+                                   GE_L_lag/(GE_L_CN+GE_L_MT+GE_L_lag)),
+                             1,function(x){
+                               x_i <- order(x, decreasing = TRUE)
+                               ifelse(x[x_i[1]] / x[x_i[2]] > 1,
+                                      return(x_i[1]),
+                                      return(4))
+                             })
+
+dat_temp <- dat_temp %>% mutate(
+  post_path2 = factor(
+    c("Linear","Switch","Delayed","None")[post_path2],
+    c("Delayed","Linear","Switch","None"))
+)
+
+dat_temp$post_path3 <- apply(cbind(GE_L_CN/(GE_L_CN+GE_L_MT+GE_L_lag),
+                                   GE_L_MT/(GE_L_CN+GE_L_MT+GE_L_lag),
+                                   GE_L_lag/(GE_L_CN+GE_L_MT+GE_L_lag)),
+                             1,function(x){
+                               x_i <- order(x, decreasing = TRUE)
+                               ifelse(x[x_i[1]] / x[x_i[2]] > 4,
+                                      return(x_i[1]),
+                                      return(4))
+                             })
+
+dat_temp <- dat_temp %>% mutate(
+  post_path3 = factor(
+    c("Linear","Switch","Delayed","None")[post_path3],
+    c("Delayed","Linear","Switch","None"))
+)
+
+table(dat_temp$post_path2, dat_temp$Estimate>0)#[-4,] %>% chisq.test()
+table(dat_temp$post_path1, dat_temp$Estimate>0)# %>% chisq.test()
+table(dat_temp$post_path3, dat_temp$Estimate>0)# %>% chisq.test()
+
+```
+
+# Sup Figure 1
+
+```{r}
+library(rrvgo)
+```
+
+```{r}
+
+go_result <- ego2@result %>% subset(p.adjust < 0.05)
+
+ego_sim <- calculateSimMatrix(go_result$ID,
+                               orgdb = "org.Hs.eg.db",
+                               ont= "BP",
+                               method = "Rel")
+
+ego_score <- setNames(-log10(go_result$p.adjust), go_result$ID)
+ego_reduced <- reduceSimMatrix(ego_sim, ego_score,
+                                threshold = 0.7,
+                                orgdb = "org.Hs.eg.db")
+```
+
+```{r, fig.width=6, fig.height=6}
+scatterPlot(ego_sim, ego_reduced)
+treemapPlot(ego_reduced)
+
+```
+
+
+
+```{r}
+
+go_result <- ego3@result %>% subset(p.adjust < 0.05)
+
+ego_sim <- calculateSimMatrix(go_result$ID,
+                               orgdb = "org.Hs.eg.db",
+                               ont= "BP",
+                               method = "Rel")
+
+ego_score <- setNames(-log10(go_result$p.adjust), go_result$ID)
+ego_reduced <- reduceSimMatrix(ego_sim, ego_score,
+                                threshold = 0.7,
+                                orgdb = "org.Hs.eg.db")
+```
+
+```{r, fig.width=6, fig.height=6}
+scatterPlot(ego_sim, ego_reduced)
+treemapPlot(ego_reduced)
+
+```
+
+
+
+
+```{r}
+
+go_result <- ego7@result %>% subset(p.adjust < 0.05)
+
+ego_sim <- calculateSimMatrix(go_result$ID,
+                               orgdb = "org.Hs.eg.db",
+                               ont= "BP",
+                               method = "Rel")
+
+ego_score <- setNames(-log10(go_result$p.adjust), go_result$ID)
+ego_reduced <- reduceSimMatrix(ego_sim, ego_score,
+                                threshold = 0.7,
+                                orgdb = "org.Hs.eg.db")
+```
+
+```{r, fig.width=7, fig.height=6}
+scatterPlot(ego_sim, ego_reduced)
+treemapPlot(ego_reduced)
+
+```
+
+
+
+```{r}
+
+go_result <- ego8@result %>% subset(p.adjust < 0.05)
+
+ego_sim <- calculateSimMatrix(go_result$ID,
+                               orgdb = "org.Hs.eg.db",
+                               ont= "BP",
+                               method = "Rel")
+
+ego_score <- setNames(-log10(go_result$p.adjust), go_result$ID)
+ego_reduced <- reduceSimMatrix(ego_sim, ego_score,
+                                threshold = 0.7,
+                                orgdb = "org.Hs.eg.db")
+```
+
+```{r, fig.width=6, fig.height=6}
+scatterPlot(ego_sim, ego_reduced)
+treemapPlot(ego_reduced)
+
+```
+
+

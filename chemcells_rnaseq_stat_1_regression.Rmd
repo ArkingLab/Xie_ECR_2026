@@ -1,0 +1,431 @@
+---
+title: "Chemical Cells RNA Seq Analysis 2 - Regressions"
+author: "jxie"
+date: "2023-01-05"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    toc_depth: 3
+    number_sections: true
+    theme: lumen
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(MASS)
+library(lme4)
+library(lmerTest)
+library(multcomp)
+library(ggalluvial)
+library(tidyverse)
+runreg = TRUE
+```
+
+# Load Data
+
+```{r}
+dat_pheno <- readRDS("02_Intermediates/Experiment_Samples.rds")
+dat_rna <-  readRDS("02_Intermediates/RNA_TMM.rds")
+dat_CN <- readRDS("02_Intermediates/mtDNA.rds")
+G_list <- read.delim("01_Inputs/mart_export.txt") %>% subset(Gene.stable.ID %in% rownames(dat_rna))
+names(G_list) <- c("ensembl_gene_id", "entrezgene_id", "hgnc_symbol", "chromosome_name", 
+                   "start_position", "end_position", "strand", "gene_type", 
+                   "gene_description", "gene_name")
+```
+
+```{r}
+dat_Mixed <- merge(dat_pheno, dat_CN[,c(1:2,4)], by.x = "SampleName", by.y = "Sample_Name")
+dat_Mixed <- dat_Mixed[order(dat_Mixed$Chemical,dat_Mixed$Curve,
+                             dat_Mixed$Dose, dat_Mixed$Rep, dat_Mixed$Lane, dat_Mixed$PO),]
+```
+
+## Map CN to pheno
+
+```{r}
+dat_CN$PO <- factor(dat_CN$PO)
+```
+
+```{r}
+dat_pheno$deltaCT_Avg <- sapply(dat_pheno$SampleName, function(x){
+  return(dat_CN$deltaCT_Avg[which(dat_CN$Sample_Name == x & !is.na(dat_CN$deltaCT_Avg))])
+})
+```
+
+# Define functions
+
+## Functions 
+
+```{r, warning=FALSE}
+mod.dat <- function(Y, rna, X, pheno){
+  out <- pheno
+  out$X = as.numeric(pheno[,X])
+  out$Y = rna[Y, out$RNASeq_label]
+  out = out %>% group_by(SampleName) %>% mutate(Y = mean(Y)) %>% ungroup()
+  out = out[!duplicated(out$SampleName),]
+  return(data.frame(out))
+}
+
+mod.lm <- function(Y, rna, X, pheno){
+  dat.glm <- mod.dat(Y, rna, X, pheno)
+  dat.glm$Y = log(dat.glm$Y)
+  coef.glm <- summary(lm(Y ~ X, dat.glm))$coef
+  
+  if("X" %in% row.names(coef.glm)){
+    out <- data.frame(Gene = Y,
+                      Estimate = coef.glm["X","Estimate"],
+                      SE = coef.glm["X",2],
+                      P = coef.glm["X",4])
+  } else {
+    out <- data.frame(Gene = Y,Estimate = NA,SE = NA,P = NA)
+  }
+  return(out)
+}
+
+TWAS.lm <- function(Yset, rna, X, pheno){
+  out <- data.frame(Gene = character(),
+                    Estimate = numeric(),
+                    SE = numeric(),
+                    P = numeric())
+  
+  n_iter = length(Yset)
+  pb <- txtProgressBar(min = 0,      # Minimum value of the progress bar
+                     max = n_iter, # Maximum value of the progress bar
+                     style = 3,    # Progress bar style (also available style = 1 and style = 2)
+                     width = 50,   # Progress bar width. Defaults to getOption("width")
+                     char = "=")
+  
+  for(i in 1:n_iter){
+    out = rbind(out,(mod.lm(Yset[i],rna,X, pheno)))
+    setTxtProgressBar(pb, i)
+  }
+  close(pb)
+  return(out)
+}
+
+mod.dat2 <- function(Y, rna, X, pheno){
+  out <- pheno
+  out$X = as.numeric(pheno[,X])
+  out$Y = rna[Y, out$RNASeq_label]
+  return(data.frame(out))
+}
+
+mod.lmer <- function(Y, rna, X, pheno){
+  dat.glm <- mod.dat2(Y, rna, X, pheno)
+  dat.glm$Y = log(dat.glm$Y)
+  coef.glm <- summary(lmer(Y ~ X + (1|SampleName), dat.glm))$coef
+  
+  if("X" %in% row.names(coef.glm)){
+    out <- data.frame(Gene = Y,
+                      Estimate = coef.glm["X","Estimate"],
+                      SE = coef.glm["X",2],
+                      P = coef.glm["X",5])
+  } else {
+    out <- data.frame(Gene = Y,Estimate = NA,SE = NA,P = NA)
+  }
+  return(out)
+}
+
+TWAS.lmer <- function(Yset, rna, X, pheno){
+  out <- data.frame(Gene = character(),
+                    Estimate = numeric(),
+                    SE = numeric(),
+                    P = numeric())
+  
+  n_iter = length(Yset)
+  pb <- txtProgressBar(min = 0,      # Minimum value of the progress bar
+                     max = n_iter, # Maximum value of the progress bar
+                     style = 3,    # Progress bar style (also available style = 1 and style = 2)
+                     width = 50,   # Progress bar width. Defaults to getOption("width")
+                     char = "=")
+  
+  for(i in 1:n_iter){
+    out = rbind(out,(mod.lmer(Yset[i],rna,X, pheno)))
+    setTxtProgressBar(pb, i)
+  }
+  close(pb)
+  return(out)
+}
+
+mod.lm2 <- function(Y, rna, X, pheno){
+  dat.glm <- mod.dat(Y, rna, X, pheno)
+  dat.glm$X2 <- dat.glm$X**2
+  dat.glm$Y = log(dat.glm$Y)
+  coef.glm <- summary(lm(Y ~ X2+X, dat.glm))$coef
+  
+  if("X2" %in% row.names(coef.glm)){
+    out <- data.frame(Gene = Y,
+                      Estimate = coef.glm["X2","Estimate"],
+                      SE = coef.glm["X2",2],
+                      P = coef.glm["X2",4])
+  } else {
+    out <- data.frame(Gene = Y,Estimate = NA,SE = NA,P = NA)
+  }
+  return(out)
+}
+
+TWAS.lm2 <- function(Yset, rna, X, pheno){
+  out <- data.frame(Gene = character(),
+                    Estimate = numeric(),
+                    SE = numeric(),
+                    P = numeric())
+  
+  n_iter = length(Yset)
+  pb <- txtProgressBar(min = 0,      # Minimum value of the progress bar
+                     max = n_iter, # Maximum value of the progress bar
+                     style = 3,    # Progress bar style (also available style = 1 and style = 2)
+                     width = 50,   # Progress bar width. Defaults to getOption("width")
+                     char = "=")
+  
+  for(i in 1:n_iter){
+    out = rbind(out,(mod.lm2(Yset[i],rna,X, pheno)))
+    setTxtProgressBar(pb, i)
+  }
+  close(pb)
+  return(out)
+}
+
+mod.lmer2 <- function(Y, rna, X, pheno){
+  dat.glm <- mod.dat2(Y, rna, X, pheno)
+  dat.glm$X2 <- dat.glm$X**2
+  dat.glm$Y = log(dat.glm$Y)
+  coef.glm <- summary(lmer(Y ~ X2 + X + (1|SampleName), dat.glm))$coef
+  
+  if("X2" %in% row.names(coef.glm)){
+    out <- data.frame(Gene = Y,
+                      Estimate = coef.glm["X2","Estimate"],
+                      SE = coef.glm["X2",2],
+                      P = coef.glm["X2",5])
+  } else {
+    out <- data.frame(Gene = Y,Estimate = NA,SE = NA,P = NA)
+  }
+  return(out)
+}
+
+TWAS.lmer2 <- function(Yset, rna, X, pheno){
+  out <- data.frame(Gene = character(),
+                    Estimate = numeric(),
+                    SE = numeric(),
+                    P = numeric())
+  
+  n_iter = length(Yset)
+  pb <- txtProgressBar(min = 0,      # Minimum value of the progress bar
+                     max = n_iter, # Maximum value of the progress bar
+                     style = 3,    # Progress bar style (also available style = 1 and style = 2)
+                     width = 50,   # Progress bar width. Defaults to getOption("width")
+                     char = "=")
+  
+  for(i in 1:n_iter){
+    out = rbind(out,(mod.lmer2(Yset[i],rna,X, pheno)))
+    setTxtProgressBar(pb, i)
+  }
+  close(pb)
+  return(out)
+}
+
+mod.lmer3 <- function(Y, rna, X, pheno){
+  dat.glm <- mod.dat2(Y, rna, X, pheno)
+  dat.glm$Y = log(dat.glm$Y)
+  coef.glm <- summary(lmer(Y ~ ns(X,df = n) + (1|SampleName), dat.glm))$coef
+  
+  i = grep("ns", rownames(coef.glm))
+  
+  out <- data.frame(Gene = Y,
+                    ns = i-1,
+                    Estimate = coef.glm[i,"Estimate"],
+                    SE = coef.glm[i,2],
+                    P = coef.glm[i,5])
+  rownames(out)<- NULL
+  return(out)
+}
+
+TWAS.lmer3 <- function(Yset, rna, X, pheno){
+  out <- data.frame(Gene = character(),
+                    ns = numeric(),
+                    Estimate = numeric(),
+                    SE = numeric(),
+                    P = numeric())
+  
+  n_iter = length(Yset)
+  pb <- txtProgressBar(min = 0,      # Minimum value of the progress bar
+                     max = n_iter, # Maximum value of the progress bar
+                     style = 3,    # Progress bar style (also available style = 1 and style = 2)
+                     width = 50,   # Progress bar width. Defaults to getOption("width")
+                     char = "=")
+  
+  for(i in 1:n_iter){
+    out = rbind(out,(mod.lmer3(Yset[i],rna,X, pheno,n)))
+    setTxtProgressBar(pb, i)
+  }
+  close(pb)
+  return(out)
+}
+
+mod.anova <- function(Y, rna, X, pheno){
+  dat.glm <- mod.dat2(Y, rna, X, pheno)
+  dat.glm$Y = log(dat.glm$Y)
+  dat.glm$X2 = dat.glm$X**2
+  mod1 <- lmer(Y ~ X + (1|SampleName), dat.glm)
+  mod2 <- lmer(Y ~ X + X2 + (1|SampleName), dat.glm)
+  mod3 <- lmer(Y ~ ns(X, df = 2)+ (1|SampleName), dat.glm)
+  mod4 <- lmer(Y ~ ns(X, df = 3)+ (1|SampleName), dat.glm)
+  
+  out <- data.frame(Gene = Y,
+                    AIC1 = anova(mod1,mod2)$AIC[1],
+                    AIC2 = anova(mod1,mod2)$AIC[2],
+                    AIC3 = anova(mod1,mod3)$AIC[2],
+                    AIC4 = anova(mod1,mod4)$AIC[2],
+                    P12 = anova(mod1,mod2)$`Pr(>Chisq)`[2],
+                    P13 = anova(mod1,mod3)$`Pr(>Chisq)`[2],
+                    P14 = anova(mod1,mod4)$`Pr(>Chisq)`[2])
+  rownames(out)<- NULL
+  return(out)
+}
+
+TWAS.anova <- function(Yset, rna, X, pheno){
+  out <- data.frame(Gene = character(),
+                    AIC1 = numeric(),
+                    AIC2 = numeric(),
+                    AIC3 = numeric(),
+                    AIC4 = numeric(),
+                    P12 = numeric(),
+                    P13 = numeric(),
+                    P14 = numeric())
+  
+  n_iter = length(Yset)
+  pb <- txtProgressBar(min = 0,      # Minimum value of the progress bar
+                     max = n_iter, # Maximum value of the progress bar
+                     style = 3,    # Progress bar style (also available style = 1 and style = 2)
+                     width = 50,   # Progress bar width. Defaults to getOption("width")
+                     char = "=")
+  
+  for(i in 1:n_iter){
+    out = rbind(out,(mod.anova(Yset[i],rna,X, pheno)))
+    setTxtProgressBar(pb, i)
+  }
+  close(pb)
+  return(out)
+}
+
+
+```
+
+
+```{r, warning=FALSE, eval = TRUE, echo = T, results = 'hide', message=FALSE}
+
+mt_list <- c("ENSG00000198899","ENSG00000198695","ENSG00000198840","ENSG00000228253","ENSG00000212907")
+
+TWAS.lm(mt_list, dat_rna, "Dose", dat_pheno %>% subset(Chemical == "ETBR" & Curve == "Dosage"))
+TWAS.lmer(mt_list, dat_rna, "Dose", dat_pheno %>% subset(Chemical == "ETBR" & Curve == "Dosage"))
+TWAS.lm(mt_list, dat_rna, "deltaCT_Avg", dat_pheno %>% subset(Chemical == "ETBR" & Curve == "Dosage"))
+TWAS.lmer(mt_list, dat_rna, "deltaCT_Avg", dat_pheno %>% subset(Chemical == "ETBR" & Curve == "Dosage"))
+TWAS.lmer(mt_list, dat_rna, "deltaCT", dat_Mixed %>% subset(Chemical == "ETBR" & Curve == "Dosage"))
+```
+
+# Regression
+
+## Linear dosage response
+
+```{r, warning=FALSE, eval = FALSE, echo = T, results = 'hide', message=FALSE}
+
+ETBR_dose_lm <- TWAS.lm(rownames(dat_rna), dat_rna, "Dose", 
+                          dat_pheno %>% subset(Chemical == "ETBR" & Curve == "Dosage" ))
+saveRDS(ETBR_dose_lm, "02_Intermediates/ETBR_dose_lm.rds")
+
+ETBR_dose_lmer <- TWAS.lmer(rownames(dat_rna), dat_rna, "Dose", 
+                          dat_pheno %>% subset(Chemical == "ETBR" & Curve == "Dosage" ))
+saveRDS(ETBR_dose_lmer, "02_Intermediates/ETBR_dose_lmer.rds")
+
+```
+
+## Linear Copy number response
+
+```{r, warning=FALSE, eval = FALSE, echo = T, results = 'hide', message=FALSE}
+
+ETBR_CN_lm <- TWAS.lm(rownames(dat_rna), dat_rna, "deltaCT_Avg", 
+                     dat_pheno %>% subset(Chemical == "ETBR"& Curve == "Dosage"))
+saveRDS(ETBR_CN_lm, "02_Intermediates/ETBR_CN_lm.rds")
+
+ETBR_CN_lm2 <- TWAS.lm2(rownames(dat_rna), dat_rna, "deltaCT_Avg", 
+                     dat_pheno %>% subset(Chemical == "ETBR"& Curve == "Dosage"))
+saveRDS(ETBR_CN_lm2, "02_Intermediates/ETBR_CN_lm2.rds")
+
+ETBR_CN_lmer <- TWAS.lmer(rownames(dat_rna), dat_rna, "deltaCT_Avg",
+                       dat_pheno %>% subset(Chemical == "ETBR"& Curve == "Dosage"))
+saveRDS(ETBR_CN_lmer, "02_Intermediates/ETBR_CN_lmer.rds")
+
+ETBR_CN_lmer2 <- TWAS.lmer2(rownames(dat_rna), dat_rna, "deltaCT_Avg",
+                       dat_pheno %>% subset(Chemical == "ETBR"& Curve == "Dosage"))
+saveRDS(ETBR_CN_lmer2, "02_Intermediates/ETBR_CN_lmer2.rds")
+
+ETBR_CN_ns2 <- TWAS.lmer3(rownames(dat_rna), dat_rna, "deltaCT_Avg",
+                       dat_pheno %>% subset(Chemical == "ETBR"& Curve == "Dosage"),2)
+saveRDS(ETBR_CN_ns2, "02_Intermediates/ETBR_CN_ns2.rds")
+
+ETBR_CN_ns3 <- TWAS.lmer3(rownames(dat_rna), dat_rna, "deltaCT_Avg",
+                       dat_pheno %>% subset(Chemical == "ETBR"& Curve == "Dosage"),3)
+saveRDS(ETBR_CN_ns3, "02_Intermediates/ETBR_CN_ns3.rds")
+
+ETBR_CN_anova <- TWAS.anova(rownames(dat_rna), dat_rna, "deltaCT_Avg",
+                       dat_pheno %>% subset(Chemical == "ETBR"& Curve == "Dosage"))
+saveRDS(ETBR_CN_anova, "02_Intermediates/ETBR_CN_anova.rds")
+
+```
+
+## Linear MT gene Fold Change response
+
+```{r, warning=FALSE, eval = FALSE, echo = T, results = 'hide', message=FALSE}
+
+ETBR_MT_lm <- TWAS.lm(rownames(dat_rna), dat_rna, "Med_log2FC_MT", 
+                     dat_pheno %>% subset(Chemical == "ETBR"& Curve == "Dosage"))
+saveRDS(ETBR_MT_lm, "02_Intermediates/ETBR_MT_lm.rds")
+
+ETBR_MT_lmer <- TWAS.lmer(rownames(dat_rna), dat_rna, "Med_log2FC_MT", 
+                     dat_pheno %>% subset(Chemical == "ETBR"& Curve == "Dosage"))
+saveRDS(ETBR_MT_lmer, "02_Intermediates/ETBR_MT_lmer.rds")
+
+```
+
+## ETBR Treatment and recovery
+
+```{r, warning=FALSE, eval = FALSE, echo = T, results = 'hide', message=FALSE}
+dat_Lon <- dat_pheno %>% subset(Curve != "Dosage")
+dat_Lon$Experiment <- factor(c("Control","EtBr")[as.numeric(dat_Lon$Dose==6)+1],
+                             levels = c("Control","EtBr"))
+
+dat_Lon2 <- dat_Mixed %>% subset(Curve != "Dosage")
+dat_Lon2$Experiment <- factor(c("Control","EtBr")[as.numeric(dat_Lon$Dose==6)+1],
+                             levels = c("Control","EtBr"))
+
+
+ETBR_LON_lm <- data.frame(Gene = character(),
+                          Estimate = numeric(),
+                          SE = numeric(),
+                          P = numeric(),
+                          Time = numeric())
+
+ETBR_LON_lmer <- data.frame(Gene = character(),
+                            Estimate = numeric(),
+                            SE = numeric(),
+                            P = numeric(),
+                            Time = numeric())
+
+for(i in unique(dat_Lon$Time)){
+  short_LON_lm <- TWAS.lm(rownames(dat_rna), dat_rna, "Experiment", 
+                          dat_Lon %>% subset(Time == i))
+  short_LON_lm$Time = i
+  ETBR_LON_lm <- rbind(ETBR_LON_lm, short_LON_lm)
+  
+  
+  short_LON_lmer <- TWAS.lmer(rownames(dat_rna), dat_rna, "Experiment", 
+                              dat_Lon %>% subset(Time == i))
+  short_LON_lmer$Time = i
+  ETBR_LON_lmer <- rbind(ETBR_LON_lmer, short_LON_lmer)
+}
+saveRDS(ETBR_LON_lm, "02_Intermediates/ETBR_LON_lm.rds")
+saveRDS(ETBR_LON_lmer, "02_Intermediates/ETBR_LON_lmer.rds")
+
+```
+
+

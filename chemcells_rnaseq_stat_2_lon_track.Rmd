@@ -1,0 +1,245 @@
+---
+title: "Chemical Cells RNA Seq Analysis 8 - EtBr Longitudinal Tracks"
+author: "jxie"
+date: "2024-05-31"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    toc_depth: 3
+    number_sections: true
+    theme: lumen
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(limma)
+library(qqman)
+library(ggplot2)
+library(ggfortify)
+library(lme4)
+library(RColorBrewer)
+library(ggpubr)
+library(readxl)
+library(org.Hs.eg.db)
+library(ggh4x)
+library(ggvenn)
+library(tidyverse)
+```
+
+# Load Data
+
+```{r}
+source("plot_functions.R")
+dat_pheno <- readRDS("02_Intermediates/Experiment_Samples.rds")
+dat_rna <-  readRDS("02_Intermediates/RNA_TMM.rds")
+dat_CN <- readRDS("02_Intermediates/mtDNA.rds")
+G_list <- read.delim("01_Inputs/mart_export.txt") %>% subset(Gene.stable.ID %in% rownames(dat_rna))
+names(G_list) <- c("ensembl_gene_id", "entrezgene_id", "hgnc_symbol", "chromosome_name", 
+                   "start_position", "end_position", "strand", "gene_type", 
+                   "gene_description", "gene_name")
+G_list <- G_list[!duplicated(G_list$ensembl_gene_id),]
+
+MitoCarta_Genes <- read_xlsx("01_Inputs/Human.MitoCarta3.0.xlsx", 
+                             sheet = "A Human MitoCarta3.0", 
+                             col_types = "text") %>%   as.data.frame() 
+MitoCarta_Paths <- read_xlsx("01_Inputs/Human.MitoCarta3.0.xlsx", 
+                             sheet = "C MitoPathways", 
+                             col_types = "text") %>% as.data.frame()
+```
+
+## Map CN to pheno
+
+```{r}
+dat_CN$PO <- factor(dat_CN$PO)
+```
+
+```{r}
+dat_Mixed <- merge(dat_pheno, dat_CN[,c(1:2,4)], 
+                   by.x = "SampleName", by.y = "Sample_Name")
+dat_Mixed <- dat_Mixed[order(dat_Mixed$Chemical,dat_Mixed$Curve,
+                             dat_Mixed$Dose, dat_Mixed$Rep, 
+                             dat_Mixed$Lane, dat_Mixed$PO),]
+```
+
+```{r}
+dat_pheno$deltaCT_Avg <- sapply(dat_pheno$SampleName, function(x){
+  return(dat_CN$deltaCT_Avg[which(dat_CN$Sample_Name == x & 
+                                    !is.na(dat_CN$deltaCT_Avg))])
+})
+
+```
+
+## Load regression
+
+```{r}
+
+ETBR_dose_lm <- readRDS("02_Intermediates/ETBR_dose_lm.rds")
+ETBR_dose_lmer <- readRDS("02_Intermediates/ETBR_dose_lmer.rds")
+
+ETBR_CN_lm <- readRDS("02_Intermediates/ETBR_CN_lm.rds")
+ETBR_CN_lmer <- readRDS("02_Intermediates/ETBR_CN_lmer.rds")
+
+ETBR_MT_lm <- readRDS("02_Intermediates/ETBR_MT_lm.rds")
+ETBR_MT_lmer <- readRDS("02_Intermediates/ETBR_MT_lmer.rds")
+
+```
+
+## Combine results
+
+```{r, fig.height=4, fig.width=12}
+
+dat_all <- ETBR_dose_lm %>% dplyr::select(Gene) %>% 
+  left_join(G_list, by = c("Gene" = "ensembl_gene_id")) %>% 
+  mutate(
+    GeneType = case_when(chromosome_name == "MT" ~ "3 MT encoded",
+                         Gene %in% MitoCarta_Genes$EnsemblGeneID_mapping_version_20200130 ~ "2 MitoCarta",
+                         TRUE ~ "1 Nuclear")
+  ) %>% 
+  subset(gene_type %in% c("protein_coding","Mt_rRNA","Mt_tRNA",
+                             "lncRNA","miRNA","misc_RNA","snRNA")) %>%
+  left_join(ETBR_dose_lm, by = "Gene") %>% rename(
+    dose_lm_b = Estimate,
+    dose_lm_SE = SE,
+    dose_lm_P = P
+  ) %>% 
+  left_join(ETBR_dose_lmer, by = "Gene") %>% rename(
+    dose_lmer_b = Estimate,
+    dose_lmer_SE = SE,
+    dose_lmer_P = P
+  ) %>% 
+  left_join(ETBR_CN_lm, by = "Gene") %>% rename(
+    CN_lm_b = Estimate,
+    CN_lm_SE = SE,
+    CN_lm_P = P
+  ) %>% 
+  left_join(ETBR_CN_lmer, by = "Gene") %>% rename(
+    CN_lmer_b = Estimate,
+    CN_lmer_SE = SE,
+    CN_lmer_P = P
+  ) %>% 
+  left_join(ETBR_MT_lm, by = "Gene") %>% rename(
+    MT_lm_b = Estimate,
+    MT_lm_SE = SE,
+    MT_lm_P = P
+  ) %>% 
+  left_join(ETBR_MT_lmer, by = "Gene") %>% rename(
+    MT_lmer_b = Estimate,
+    MT_lmer_SE = SE,
+    MT_lmer_P = P
+  ) %>% 
+  arrange(GeneType)
+
+```
+
+# Compare P values from experiments
+
+```{r, fig.height=6, fig.width=6}
+ggplot(dat_all, aes(x = -log10(CN_lmer_P), y = -log10(dose_lmer_P), color = GeneType)) + 
+  geom_point() + geom_abline(slope = 1, intercept = 0) + theme_light() + 
+  xlab("EtBr CN Association") + ylab("EtBr Dosage Association") + 
+  ggtitle("-log10(P) of GE ~ mtDNA-CN")
+```
+
+```{r}
+table(dat_all$GeneType, dat_all$CN_lmer_P > dat_all$dose_lmer_P)
+```
+
+```{r, fig.height=6, fig.width=6}
+ggplot(dat_all, aes(x = -log10(CN_lmer_P), y = -log10(MT_lmer_P), color = GeneType)) + 
+  geom_point() + geom_abline(slope = 1, intercept = 0) + theme_light() + 
+  xlab("-log10(P) of GE ~ mtDNA-CN") + ylab("-log10(P) of GE ~ median MT GE") + ggtitle("EtBr Dosage Experiment")
+```
+
+```{r}
+table(dat_all$GeneType, dat_all$CN_lmer_P > dat_all$MT_lmer_P)
+
+table(cn = p.adjust(dat_all$CN_lmer_P,"holm") < 0.05, mt = p.adjust(dat_all$MT_lmer_P,"holm") < 0.05)
+
+```
+
+# Path prediction
+
+## Using likelihood to create categories
+
+```{r, eval = F}
+dat_etbr <- dat_all %>% 
+  mutate(Estimate = CN_lmer_b,
+         SE = CN_lmer_SE,
+         P = CN_lmer_P) %>% 
+  select(Gene, entrezgene_id, hgnc_symbol, gene_type, chromosome_name, start_position,
+         end_position, strand, gene_description, GeneType, 
+         Estimate, SE, P)
+
+GE_mean <- sapply(dat_etbr$Gene, function(x){
+  a <- data.Scale.Lag2(x)
+  if(a$Y[3] < 0){ a$Y = a$Y * -1}
+  
+  Y_mult = a$Y[3]
+  return(a$Y/Y_mult)
+})
+
+GE_sd <- sapply(dat_etbr$Gene, function(x){
+  a <- data.Scale.Lag2(x)
+  if(a$Y[3] < 0){ a$Y = a$Y * -1}
+  
+  Y_mult = a$Y[3]
+  return(a$Ysd/Y_mult)
+})
+
+a <- data.Scale.Lag("PSAT1")
+
+CN_mean <- c(0,0.5,1,0.5)
+MT_mean <- c(0,1,1,0)
+lag_mean = c(0,.25,1,1)
+  # apply(GE_mean[,c("ENSG00000153879",
+  #                  "ENSG00000166986",
+  #                  "ENSG00000113739",
+  #                  "ENSG00000198860",
+  #                  "ENSG00000135069",
+  #                  "ENSG00000110619",
+  #                  "ENSG00000182199")],1,mean)
+sen_mean = c(0,1,1,1)
+
+GE_L_CN <- c()
+GE_L_MT <- c()
+GE_L_lag <- c()
+
+for(i in 1:(dim(GE_mean)[2])){
+  GE_L_CN <- c(GE_L_CN, dnorm(CN_mean[2],GE_mean[2,i],GE_sd[2,i]) * dnorm(CN_mean[4],GE_mean[4,i],GE_sd[4,i]))
+  GE_L_MT <- c(GE_L_MT, dnorm(MT_mean[2],GE_mean[2,i],GE_sd[2,i]) * dnorm(MT_mean[4],GE_mean[4,i],GE_sd[4,i]))
+  GE_L_lag <- c(GE_L_lag, dnorm(lag_mean[2],GE_mean[2,i],GE_sd[2,i]) * dnorm(lag_mean[4],GE_mean[4,i],GE_sd[4,i]))
+}
+
+dat_etbr <- dat_etbr %>%
+  mutate(
+    L_CN = GE_L_CN,
+    L_MT = GE_L_MT,
+    L_lag = GE_L_lag,
+    # P_CN = GE_L_CN/(GE_L_CN+GE_L_MT+GE_L_lag+GE_L_sen),
+    # P_MT = GE_L_MT/(GE_L_CN+GE_L_MT+GE_L_lag+GE_L_sen),
+    # P_lag = GE_L_lag/(GE_L_CN+GE_L_MT+GE_L_lag+GE_L_sen),
+  )
+
+dat_etbr$post_path <- apply(cbind(GE_L_CN/(GE_L_CN+GE_L_MT+GE_L_lag),
+                                   GE_L_MT/(GE_L_CN+GE_L_MT+GE_L_lag),
+                                   GE_L_lag/(GE_L_CN+GE_L_MT+GE_L_lag)),
+                             1,function(x){
+                               x_i <- order(x, decreasing = TRUE)
+                               ifelse(x[x_i[1]] / x[x_i[2]] > 2,
+                                      return(x_i[1]),
+                                      return(4))
+                             })
+
+dat_etbr <- dat_etbr %>% mutate(
+  post_path = c("Linear","Switch","Delayed","None")[post_path]
+)
+
+dat_etbr$chromosome_name = factor(dat_etbr$chromosome_name,levels = c(
+  1:22,"X","MT"
+))
+
+
+saveRDS(dat_etbr, "02_Intermediates/ETBR_paths.rds")
+```

@@ -1,0 +1,355 @@
+---
+title: "Chemical Cells RNA Seq Data 1 - Read in data"
+author: "jxie"
+date: "12/2/2022"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    toc_depth: 3
+    number_sections: true
+    theme: lumen
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+## install.packages("hash")
+#BiocManager::install("edgeR")
+library(readxl)
+library(edgeR)
+library(ggplot2)
+library(ggfortify)
+library(RColorBrewer)
+library(tidyverse)
+```
+
+# Read and process data
+
+## Read in data and bridge files
+
+```{r}
+
+mrna.count <- read.csv("01_Inputs/merged.csv")
+
+chem.bridge <- read.csv("01_Inputs/AllSamples.Randomized.RNAseq.csv")[1:112,1:18]
+mtdna.data <- as.data.frame(
+  read_xlsx("01_Inputs/ChemicalProjectMatchUpDeltaCT.xlsx")[,-1]
+)
+
+```
+
+## Create table of experiment information for counts
+
+```{r}
+sample_no <- sapply(names(mrna.count)[-1], function(x){
+  return(as.numeric(substring(strsplit(x,"_")[[1]][3],7)))
+})
+lane_no <- sapply(names(mrna.count)[-1], function(x){
+  return(as.numeric(substring(strsplit(x,"_")[[1]][5],4)))
+})
+```
+
+
+```{r}
+
+mrna.chara <- data.frame(
+  RandomNumber = sapply(sample_no, function(x){chem.bridge$SampleNumber[which(chem.bridge$RandomNumber==x)]}),
+  SampleNumber = sample_no,
+  Lane = lane_no,
+  SampleName = sapply(sample_no, function(x){chem.bridge$SampleName[which(chem.bridge$RandomNumber==x)]}),
+  RNASeq_label = names(mrna.count)[-1], 
+  Chemical = NA,
+  Dose = NA, 
+  Experiment = "Dosage",
+  Curve = NA,
+  Time = 48,
+  DMSO = FALSE,
+  row.names = NULL
+)
+```
+
+```{r}
+mrna.chara$DMSO = grepl("DMSO",mrna.chara$SampleName)
+
+mrna.chara$Experiment[grepl("BaseLine",mrna.chara$SampleName) | grepl("hr",mrna.chara$SampleName)] = "Longitudinal"
+mrna.chara$Chemical[mrna.chara$Experiment == "Longitudinal"] = "ETBR"
+mrna.chara$Curve[mrna.chara$Experiment == "Longitudinal"] = sapply(
+  mrna.chara$SampleName[mrna.chara$Experiment == "Longitudinal"],
+  function(x){strsplit(strsplit(x,"_")[[1]][1],"-")[[1]][3]})
+mrna.chara$Curve[mrna.chara$Experiment=="Longitudinal" & grepl("BaseLine",mrna.chara$SampleName)] = "Treatment"
+mrna.chara$Curve[mrna.chara$Experiment=="Dosage"] = "Dosage"
+mrna.chara$Time[mrna.chara$Experiment=="Longitudinal" & grepl("BaseLine",mrna.chara$SampleName)] = 0
+mrna.chara$Time[mrna.chara$Experiment=="Longitudinal" & !grepl("BaseLine",mrna.chara$SampleName)] = 
+  sapply(mrna.chara$SampleName[mrna.chara$Experiment=="Longitudinal" & !grepl("BaseLine",mrna.chara$SampleName)],
+         function(x){
+           return(as.numeric(gsub("([0-9]+).*$", "\\1", substring(x,1,3))))
+         })
+
+mrna.chara$Time[mrna.chara$Curve == "Recovery"] = mrna.chara$Time[mrna.chara$Curve == "Recovery"] + 48
+
+mrna.chara$Dose[grepl("NC",mrna.chara$SampleName) | grepl("DMSO",mrna.chara$SampleName)] = 0
+mrna.chara$Dose[mrna.chara$Experiment=="Longitudinal" & is.na(mrna.chara$Dose) & mrna.chara$Chemical == "Acet"] = 7
+mrna.chara$Dose[mrna.chara$Experiment=="Longitudinal" & is.na(mrna.chara$Dose)] = 6
+```
+
+```{r}
+for(i in 1:3){
+  chem = c("Acet","ETBR","RESV")[i]
+  unit = c(0.25,25,4)[i]
+  mrna.chara$Chemical[grep(chem,mrna.chara$SampleName)] = chem
+  n = which(grepl(chem,mrna.chara$SampleName) & is.na(mrna.chara$Dose))
+  mrna.chara$Dose[n] = sapply(mrna.chara$SampleName[n],
+                              function(x){
+                                return(parse_number(strsplit(x,"-")[[1]][1]) / unit)
+                              }
+  )
+}
+
+```
+
+```{r}
+mrna.chara <- mrna.chara %>% subset(Chemical=="ETBR")
+mrna.count <- mrna.count[,c("Gene",mrna.chara$RNASeq_label)]
+```
+
+```{r}
+mrna.chara$Rep <- sapply(mrna.chara$SampleName, function(x){
+  substr(x, nchar(x), nchar(x))
+})
+mrna.chara$Rep[which(mrna.chara$Rep=="o")]=1
+
+pheno.out <- mrna.chara[,c("SampleName","Rep","Lane","RNASeq_label", "Chemical",
+                           "Dose","Curve","Time")]
+
+```
+
+```{r}
+pheno.out$Rep <- factor(pheno.out$Rep)
+pheno.out$Lane <- factor(pheno.out$Lane)
+pheno.out$Dose <- factor(pheno.out$Dose)
+pheno.out$Time <- factor(pheno.out$Time, levels = seq(0,192,24))
+pheno.out$Curve <- factor(pheno.out$Curve, levels = c("Dosage","Treatment","Recovery"))
+
+pheno.out <- pheno.out %>% arrange(Curve, Time, Dose, Rep, Lane)
+```
+
+## Normalize Counts
+
+```{r}
+dat.cnt <- as.matrix(mrna.count[,-1])
+row.names(dat.cnt) <- mrna.count$Gene
+gene_median <- apply(dat.cnt[,mrna.chara$RNASeq_label[mrna.chara$Dose==0]],1,function(x){median(x)})
+valid_gene <- which(gene_median > 49 & grepl("ENSG", mrna.count$Gene))
+
+```
+
+### PCA and identifying outliers
+
+```{r}
+y <- DGEList(dat.cnt[valid_gene,])
+y <- calcNormFactors(y, method = "TMM")
+norm.tmm <- cpm(y)
+row.names(norm.tmm) <- mrna.count$Gene[valid_gene]
+log.pca <- prcomp(t(log(norm.tmm+1)), scale. = T)
+```
+
+```{r}
+find.PCA.outliers <- function(data, sd_num){
+  #' @param data - prcomp object
+  #' @param sd_num - number of SDs outliers should be discovered by
+  
+  sample_outliers=c()
+  all_outliers=c()
+  
+  for(i in 1:10){
+    a<-subset(rownames(data$x), data$x[,i] > (mean(data$x[,i])+sd_num*sd(data$x[,i])))
+    b<-subset(rownames(data$x), data$x[,i] < (mean(data$x[,i])-sd_num*sd(data$x[,i])))
+    out<-c(a,b)
+    sample_outliers <- c(sample_outliers,out)
+    all_outliers=c(all_outliers,sample_outliers)
+    sample_outliers=c()
+  }
+  
+  outlier<-unique(all_outliers)
+  return(outlier)
+}
+```
+
+```{r, fig.width = 8, fig.height=6}
+dat.plot <- cbind(mrna.chara, log.pca$x[mrna.chara$RNASeq_label,1:5])
+dat.plot$Dose <- factor(dat.plot$Dose)
+dat.plot$Time <- factor(dat.plot$Time)
+
+ggplot(dat.plot, aes(x = PC1, y = PC2, colour =Curve, scale = F, label = F, size=Dose, 
+                     shape=Time)) + 
+  geom_point() + theme_light() +scale_shape_manual(values=c(3,4,1,2,6,0,8))
+```
+
+### Exclude outliers and duplicates
+
+```{r}
+mrna.chara$Exclude = FALSE
+mrna.chara$Exclude[which(mrna.chara$RNASeq_label %in% find.PCA.outliers(log.pca, 4))] = TRUE
+mrna.chara$Exclude[grep("RESV_NC",mrna.chara$SampleName)] = TRUE
+mrna.chara$Exclude[which("ETBR_NC1" == mrna.chara$SampleName)] = TRUE
+
+```
+
+```{r}
+table(mrna.chara[,c("Dose","Exclude","Curve")])
+```
+
+
+### Rerun without outliers
+
+```{r}
+mrna.chara <- mrna.chara[which(!mrna.chara$Exclude),]
+pheno.out <- pheno.out %>% subset(RNASeq_label %in% mrna.chara$RNASeq_label)
+
+dat.cnt <- as.matrix(mrna.count[,mrna.chara$RNASeq_label])
+
+gene_median <- apply(dat.cnt[,mrna.chara$RNASeq_label[mrna.chara$Dose==0 & !mrna.chara$Exclude]],1,function(x){median(x)})
+valid_gene <- which(gene_median > 49 & grepl("ENSG", mrna.count$Gene))
+
+```
+
+```{r}
+y <- DGEList(dat.cnt[valid_gene,])
+
+y <- calcNormFactors(y, method = "TMM")
+norm.tmm <- cpm(y)
+row.names(norm.tmm) <- mrna.count$Gene[valid_gene]
+```
+
+```{r}
+log.pca <- prcomp(t(log(norm.tmm+1)), scale. = T)
+
+```
+
+```{r, fig.width = 8, fig.height=6}
+dat.plot <- cbind(mrna.chara, log.pca$x[mrna.chara$RNASeq_label,1:5])
+dat.plot$Dose <- factor(dat.plot$Dose)
+dat.plot$Time <- factor(dat.plot$Time)
+
+ggplot(dat.plot, aes(x = PC1, y = PC2, colour =Curve, scale = F, label = F, size=Dose, 
+                     shape=Time)) + 
+  geom_point() + theme_light() +scale_shape_manual(values=c(3,4,1,2,6,0,8))
+```
+
+```{r}
+
+dat.plot$count_mean <- apply(dat.cnt[valid_gene,dat.plot$RNASeq_label],2,mean)
+dat.plot$count_median <- apply(dat.cnt[valid_gene,dat.plot$RNASeq_label],2,median)
+
+dat.plot$tmm_mean <- apply(norm.tmm[,dat.plot$RNASeq_label],2,mean)
+dat.plot$tmm_median <- apply(norm.tmm[,dat.plot$RNASeq_label],2,median)
+
+```
+
+
+```{r, fig.width = 12, fig.height=6}
+ggplot(dat.plot %>% subset(Curve=="Dosage"), aes(x = paste(Chemical,Dose), y = count_mean)) + 
+  geom_boxplot(outlier.shape = NA) + geom_jitter(width = 0.1,aes(color = Chemical)) + 
+  theme_light() + theme(legend.position = "none") +
+  scale_color_brewer(type = "qual", palette = "Dark2")
+```
+
+```{r, fig.width = 12, fig.height=6}
+ggplot(dat.plot %>% subset(Curve=="Dosage"), aes(x = paste(Chemical,Dose), y = tmm_mean)) + 
+  geom_boxplot(outlier.shape = NA) + geom_jitter(width = 0.1,aes(color = Chemical)) + 
+  theme_light() + theme(legend.position = "none") +
+  scale_color_brewer(type = "qual", palette = "Dark2")
+```
+
+
+```{r, fig.width = 12, fig.height=6}
+ggplot(dat.plot %>% subset(Curve=="Dosage"), aes(x = paste(Chemical,Dose), y = count_median)) + 
+  geom_boxplot(outlier.shape = NA) + geom_jitter(width = 0.1,aes(color = Chemical)) + 
+  theme_light() + theme(legend.position = "none") +
+  scale_color_brewer(type = "qual", palette = "Dark2")
+```
+
+```{r, fig.width = 12, fig.height=6}
+ggplot(dat.plot %>% subset(Curve=="Dosage"), aes(x = paste(Chemical,Dose), y = tmm_median)) + 
+  geom_boxplot(outlier.shape = NA) + geom_jitter(width = 0.1,aes(color = Chemical)) + 
+  theme_light() + theme(legend.position = "none") +
+  scale_color_brewer(type = "qual", palette = "Dark2")
+```
+
+
+# Get annotation for genes
+
+```{r}
+library(biomaRt)
+ensembl <- useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl",
+                      mirror = "useast")
+GeneList <- getBM(attributes = c('ensembl_gene_id', 'entrezgene_id',
+                                 "hgnc_symbol","chromosome_name",
+                                 "start_position","end_position",
+                                 "strand",
+                                 "entrezgene_description", "gene_biotype"),
+                  filters = 'ensembl_gene_id',
+                  values = rownames(norm.tmm),
+                  # values = mrna.count$Gene,
+                  mart = ensembl)
+GeneList <- GeneList[!duplicated(GeneList$ensembl_gene_id),]
+saveRDS(GeneList,"01_Inputs/GeneList.rds")
+```
+
+# Generate MT RNA CN
+
+```{r}
+# G_list <- readRDS("01_Inputs/GeneList.rds")
+G_list <- read.delim("01_Inputs/mart_export.txt") %>% subset(Gene.stable.ID %in% rownames(norm.tmm))
+names(G_list) <- c("ensembl_gene_id", "entrezgene_id", "hgnc_symbol", "chromosome_name", 
+                   "start_position", "end_position", "strand", "gene_type", 
+                   "gene_description", "gene_name")
+
+mt_genes <- G_list$ensembl_gene_id[G_list$chromosome_name == "MT" & G_list$gene_type == "protein_coding"]
+
+MT_NC <- pheno.out %>% select(Chemical, Curve, Time) %>% distinct()
+
+for(i in mt_genes){
+  NC_means = c()
+  for(j in 1:(dim(MT_NC)[1])){
+    sample_j = pheno.out %>% 
+      subset(Chemical == MT_NC$Chemical[j] & Curve == MT_NC$Curve[j] & Time == MT_NC$Time[j] & Dose == 0) %>%
+      select(RNASeq_label) %>% unlist()
+    NC_means = c(NC_means,norm.tmm[i,sample_j] %>% unlist() %>% mean())
+  }
+  MT_NC[[i]] = NC_means
+}
+
+Median_log2FC_MT = c()
+Med_gene = c()
+for(i in 1:(dim(pheno.out)[1])){
+  Gene_log2FC_MT = c()
+  RNA_sample = pheno.out$RNASeq_label[i]
+  NC_i = which(pheno.out$Chemical[i] == MT_NC$Chemical & 
+                 pheno.out$Curve[i] == MT_NC$Curve & 
+                 pheno.out$Time[i] == MT_NC$Time)
+  for( j in mt_genes){
+    Gene_log2FC_MT = c(Gene_log2FC_MT, log2(unlist(norm.tmm[j,RNA_sample])/
+                                              unlist(MT_NC[NC_i,j])))
+  }
+  Median_log2FC_MT = c(Median_log2FC_MT,median(Gene_log2FC_MT))
+  # Med_gene = c(Med_gene, which(median(Gene_log2FC_MT)==Gene_log2FC_MT))
+}
+
+pheno.out$Med_log2FC_MT <- Median_log2FC_MT
+# pheno.out$Med_MT_Gene <- mt_genes[Med_gene]
+
+```
+
+
+# Export
+
+```{r}
+saveRDS(pheno.out, file = "02_Intermediates/Experiment_Samples.rds")
+saveRDS(norm.tmm, file = "02_Intermediates/RNA_TMM.rds")
+saveRDS(mtdna.data, file = "02_Intermediates/mtDNA.rds")
+```
+
+
+
