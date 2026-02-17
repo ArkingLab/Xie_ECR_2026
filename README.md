@@ -1,4 +1,4 @@
-# RNASeq Stats Export
+# Code for paper "Transcriptomic analysis of cells following decreased mitochondrial DNA-copy number reveals compensatory mechanisms in mitochondrial DNA replication and cellular energetics"
 
 ## R Markdown files
 
